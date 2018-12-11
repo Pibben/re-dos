@@ -10,13 +10,13 @@
  * copyright holder ExactCODE GmbH Germany.
  */
 
-static uint8_t addr_reg[] = { 0, 2, 4, 6, 0xc0, 0xc4, 0xc8, 0xcc };
-static uint8_t count_reg[] = { 1, 3, 5, 7, 0xc2, 0xc6, 0xca, 0xce };
-static uint8_t page_reg[] = { 0x87, 0x83, 0x81, 0x82, 0x8f, 0x8b, 0x89, 0x8a };
+static uint8_t addr_reg[] = {0, 2, 4, 6, 0xc0, 0xc4, 0xc8, 0xcc};
+static uint8_t count_reg[] = {1, 3, 5, 7, 0xc2, 0xc6, 0xca, 0xce};
+static uint8_t page_reg[] = {0x87, 0x83, 0x81, 0x82, 0x8f, 0x8b, 0x89, 0x8a};
 static uint8_t flipflop_reg[] = {0xa, 0xd8};
-static uint8_t disable_reg[] =  {0xb, 0xd4};
+static uint8_t disable_reg[] = {0xb, 0xd4};
 static uint8_t mode_reg[] = {0xc, 0xd6};
-static uint8_t clear_reg[] =  {0xe, 0xdc};
+static uint8_t clear_reg[] = {0xe, 0xdc};
 
 void dma_setup(uint8_t dma, uint32_t realaddr, uint32_t dma_size)
 {
@@ -32,6 +32,7 @@ void dma_setup(uint8_t dma, uint32_t realaddr, uint32_t dma_size)
   outb(mode_reg[dma >> 2], mode);
   
   // set address
+  
   // set page
   outb(page_reg[dma], realaddr >> 16);
   

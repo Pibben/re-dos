@@ -1,4 +1,11 @@
+/* Copyright (c) 2010 ExactCODE GmbH. All rights reserved. */
+
 #if defined(WIN32) || defined(DOS)
+
+/* MIN, MAX non-standard here, ... */
+#define MIN(a, b) ((a < b) ? (a) : (b))
+#define MAX(a, b) ((a > b) ? (a) : (b))
+#define ABS(a) ((a) < 0 ? -(a) : (a))
 
 #define M_PI	3.14159265358979323846	/* pi */
 

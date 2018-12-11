@@ -10,6 +10,8 @@
  * copyright holder ExactCODE GmbH Germany.
  */
 
+static char* psp;
+
 // has to be placed 1st in .TEXT by linker script
 // "naked" attribute new since gcc-7, do not supportd C in clang
 #ifndef DOS_NOSTART
@@ -17,29 +19,29 @@
 #ifdef DOS_WANT_ARGS
 extern "C" int main(int, const char**);
 
-static void __attribute__((noinline)) _main(char* psp) {
+static int __attribute__((noinline)) _main() {
   uint8_t argc = 0; // 1st count args, and tokenize
   // we rely on the first being a space, also term'ed w/ 0xd
   int8_t i, j, len = psp[0x80];
   
   for (i = 0; i < len; ++i)
-    if (psp[0x81 + i] ==  ' ') {
+    if (psp[0x81 + i] == ' ') {
       psp[0x81 + i] = 0; // zero terminate
       ++argc;
     }
   psp[0x81 + i] = 0; // zero terminate, overwrite last 0xd :-/!
   
   {
-    // TODO: somehow the code below brekas with -fomit-frame-pointer!?
     const char* argv[argc] = {}; // 2nd allocate and assign
-    // iterate again, we had to determine the argg stack size first
+    // iterate again, we had to determine the argc stack size first
     for (i = 0, j = 0; i < len && j < argc; ++i) {
       if (psp[0x81 + i] == 0) {
 	argv[j] = psp + 0x81 + 1 + i;
 	++j;
       }
     }
-    main(argc, argv);
+    
+    return main(argc, argv);
   }
 }
 #else
@@ -48,15 +50,14 @@ extern "C" int main();
 
 static void __attribute__((section(".start"), naked, used)) start() {
 #ifdef DOS_WANT_ARGS
-  char* psp;
   // Program Segment Prefix in DS:BX
   asm volatile (""
 		: "=b"(psp)/* ouptut */
 		: /* no inputs */
 		: /* no clobbers */);
-  _main(psp);
+  uint8_t ret = _main();
 #else
-  main();
+  uint8_t ret = main();
 #endif
   asm("mov $0x4c, %ah\n"
       "int $0x21\n");
@@ -489,12 +490,110 @@ struct unrealptr {
   
   void set16(uint32_t index, uint16_t val) {
     index += offset;
-     asm volatile ( "mov %%cx, %%gs:(%0)"
+     asm volatile ( "mov %1, %%gs:(%0)"
 		    : /* no outputs */
-		    : "bSD"(index), "c"(val)
+		    : "bSD"(index), "q"(val)
 		    : /* no clobbers */);
- };
+  }
+  
+  void set32(uint32_t index, uint32_t val) {
+    index += offset;
+     asm volatile ( "mov %1, %%gs:(%0)"
+		    : /* no outputs */
+		    : "bSD"(index), "q"(val)
+		    : /* no clobbers */);
+  }
 
 protected:
   const uint32_t offset;
 };
+
+const char* getenv(const char* name)
+{
+  // environment segment from PSP
+  uint32_t envseg = *(uint16_t*)(psp + 0x2c);
+  
+  // farptr abstraction
+  farptr environ(envseg * 16);
+  uint16_t i = 0, beg, end;
+  do {
+    // parse each zero terminated line
+    beg = i;
+    char v;
+    do {
+      v = environ.get8(i++);
+    } while (v && i < 400);
+    end = i - 1;
+    
+    // compare variable name
+    uint16_t j;
+    for (j = 0; j <= end - beg; ++j) {
+      v = environ.get8(beg + j);
+      if (name[j] != v)
+	break;
+    }
+    
+    if (v == '=' && name[j] == 0) {
+      //printf("%d %d %d\n", beg, end, j);
+      // we need a "local" near pointer copy :-/
+      static char buffer[16];
+      char* b = buffer;
+      // TODO: check buffer size overflow!
+      for (++j; j <= end - beg; ++j) {
+	*b++ = environ.get8(beg + j);
+      }
+      return buffer;
+    }
+  } while (beg != end);
+  
+  return 0;
+}
+
+// Warning: output is raw, real-mode seg:offset!
+static int mouse_init()
+{
+  int ret, buttons;
+  asm volatile ("mov $0x0, %%ax\n" // reset/init
+		"int $0x33\n"
+ 		: "=a"(ret), "=b"(buttons)
+		: /* no inputs */
+		: /* no clobbers */);
+  return ret ? buttons : ret;
+}
+
+// Warning: output is raw, real-mode seg:offset!
+static void mouse_set_max(uint16_t w, uint16_t h)
+{
+  asm volatile ("mov $0x07, %%ax\n" // set horiz min/max
+		"int $0x33\n"
+ 		: /* no outputs */
+		: "c"(0), "d"(w)
+		: /* no clobbers */);
+  asm volatile ("mov $0x08, %%ax\n" // set vert min/max
+		"int $0x33\n"
+ 		: /* no outputs */
+		: "c"(0), "d"(h)
+		: /* no clobbers */);
+}
+
+
+// Warning: output is raw, real-mode seg:offset!
+static void (*mouse_swapvect(uint32_t* eventmask, void (*isr)()))()
+{
+  void (*ret)();
+  asm volatile (//"int3\n"
+		"push %%es\n" // save es
+		"mov %%edx, %%ebx\n" // shuffle seg into ds
+		"shr $16, %%ebx\n"
+		"mov %%bx, %%es\n"
+		"mov $0x14, %%ax\n" // swap mouse int vector ES:DX
+		"int $0x33\n"
+		"mov %%es, %%ax\n" // load far ptr pair
+		"shl $16, %%eax\n"
+		"add %%dx, %%ax\n"
+		"pop %%es\n"
+		: "=a"(ret), "=c"(*eventmask)
+		: "d"(isr), "c"(*eventmask)
+		: "bx");
+  return ret;
+}

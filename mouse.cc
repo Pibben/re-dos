@@ -28,54 +28,6 @@ typedef unsigned char uchar;
 
 struct ModeInfoBlock modeinfo;
 
-// Warning: output is raw, real-mode seg:offset!
-static int mouse_init()
-{
-  int ret, buttons;
-  asm volatile ("mov $0x0, %%ax\n" // reset/init
-		"int $0x33\n"
- 		: "=a"(ret), "=b"(buttons)
-		: /* no inputs */
-		: /* no clobbers */);
-  return ret ? buttons : ret;
-}
-
-// Warning: output is raw, real-mode seg:offset!
-static void mouse_set_max(uint16_t w, uint16_t h)
-{
-  asm volatile ("mov $0x07, %%ax\n" // set horiz min/max
-		"int $0x33\n"
- 		: /* no outputs */
-		: "c"(0), "d"(w)
-		: /* no clobbers */);
-  asm volatile ("mov $0x08, %%ax\n" // set vert min/max
-		"int $0x33\n"
- 		: /* no outputs */
-		: "c"(0), "d"(h)
-		: /* no clobbers */);
-}
-
-
-// Warning: output is raw, real-mode seg:offset!
-static void (*mouse_swapvect(uint32_t* eventmask, void (*isr)()))()
-{
-  void (*ret)();
-  asm volatile (//"int3\n"
-		"push %%es\n" // save es
-		"mov %%edx, %%ebx\n" // shuffle seg into ds
-		"shr $16, %%ebx\n"
-		"mov %%bx, %%es\n"
-		"mov $0x14, %%ax\n" // swap mouse int vector ES:DX
-		"int $0x33\n"
-		"mov %%es, %%ax\n" // load far ptr pair
-		"shl $16, %%eax\n"
-		"add %%dx, %%ax\n"
-		"pop %%es\n"
-		: "=a"(ret), "=c"(*eventmask)
-		: "d"(isr), "c"(*eventmask)
-		: "bx");
-  return ret;
-}
 
 uint16_t mx, my, c;
 
@@ -159,7 +111,7 @@ void draw_cursor(unrealptr& p, uint16_t mx, uint16_t my)
 }
 
 extern "C"
-int main(void)
+int main()
 {
   uint16_t ret;
   
@@ -255,7 +207,6 @@ int main(void)
   }
   
   vga_mode(0x03); // back ot text mode
-  
   
   mouse_swapvect(&orig_mask, orig_isr);
   
