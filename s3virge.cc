@@ -11,12 +11,14 @@
  */
 
 // TODO:
-// * double check fractional triangle positions!
+// * software clip and sub-divide negative xstart :-/!
+// * double check fractional triangle positions! and off-by-one!
 // * finish & test double-buffer on real hw
-// * 8 bit DST flat triangle (lines work!)
+// * 8 bit DST flat triangle (lines work!), not in pcem? real hardware
+// * 8 bit textures, not in pcem, real hw, too
 // * full texture details & perspective correction
 // * some more software engine API
-// * s3d wait for free FIFO?
+// * more fine grained s3d wait for free FIFO, test on hw!
 // * s3d ring buffer test example
 
 #ifndef DOS
@@ -482,7 +484,31 @@ static int16_t _intrp2(uint16_t v0, uint16_t v1, int16_t d, uint16_t dy01, uint1
   return v1 - v;
 }
 
-// TODO: texture, alpha, fog control
+static void waitFifo(unrealptr& p) {
+  for (uint32_t status = 0; ((status >> 8) & 0x1f) < 16; ) {
+    status = p.get32(iobase + 0x8504); // Subsystem Status Register
+#if 0
+    _CMD(p, 0x8504, status, "status");
+    _CMD(p, 0x8504, (status >> 8) & 0x1f, "fifo free");
+    _CMD(p, 0x8504, (status >> 13) & 1, "idle");
+    if (dbgline > 25) dbgline = 0;
+#endif
+  }
+}
+
+static void waitEngine(unrealptr& p) {
+  for (uint32_t status = 0; !((status >> 13) & 1);) {
+    status = p.get32(iobase + 0x8504); // Subsystem Status Register
+#if 0
+    _CMD(p, 0x8504, status, "status");
+    _CMD(p, 0x8504, (status >> 8) & 0x1f, "fifo free");
+    _CMD(p, 0x8504, (status >> 13) & 1, "idle");
+    if (dbgline > 25) dbgline = 0;
+#endif
+  }
+}
+
+// TODO: more texture, alpha, fog control
 void s3v_3dtriangle(unrealptr& p,
 		    vertexf v0, vertexf v1, vertexf v2,
 		    uint32_t c0, uint32_t c1, uint32_t c2,
@@ -514,14 +540,16 @@ void s3v_3dtriangle(unrealptr& p,
   //  /. 1    1. \
   // 0´         ` 0
   const uint16_t stride = vga_w * vga_bytes;
-  const int16_t dx = x1 - x0, dx2 = x2 - x0;
+  int16_t dx = x1 - x0, dx2 = x2 - x0;
   // TODO: maybe dy on rounded to integer?
-  const int16_t dy = y0 - y2 + 1, dy12 = y1 - y2 + 1;
+  int16_t dy = y0 - y2 + 1, dy12 = y1 - y2 + 1;
   const int16_t dy01 = dy - dy12; 
   
-  // avoid div0 exception
-  if (dx == 0 || dy == 0 || y0 < 0)
+  // needs more full software clipping and sub-devisions for negative x
+  if (y0 < 0)
     return;
+  if (dx == 0) dx = 1;
+  if (dy == 0) dy = 1;
   
   // xdir by intersecting points at y1
   int16_t _dx = x0 + dx2 * dy01 / dy;
@@ -531,6 +559,8 @@ void s3v_3dtriangle(unrealptr& p,
   
   // interpolate, construct a _p1 for x-delta
 #define intrp2(v0, v1, d) _intrp2(v0, v1, d, dy01, dy, _dx)
+  
+  waitFifo(p);
   
   int16_t dr, dg, db, da;
   dr = RED(c2) - RED(c0); // 1st y-deltas directly
@@ -871,8 +901,8 @@ void project(vertexf v)
 {
   // project 3d model to 2d screen plane
   int16_t z = v[2] == 0 ? 1 : v[2];
-  v[0] = v[0] * 256 / z;
-  v[1] = v[1] * 256 / z;
+  v[0] = v[0] * 256 / z + vga_w / 2;
+  v[1] = v[1] * 256 / z + vga_h / 2;
   //v[2] = v[2] * 256 / z;
 }
 
@@ -968,28 +998,23 @@ void mtxConcat(float a[4][4], float b[4][4])
   }
 }
 
-static float mtx2[4][4], mtx[4][4];
+static float mtx2[4][4], mtx[4][4]; // global only save stack space :-/
 
-static uint16_t vi = 0;
-static vertex vertices[6*3*2] = {
-  // currently space for one cube of quads (2x triangle)
-};
-
-static uint32_t colors[6*2] = {
+static uint32_t colors[6] = {
   0x333333, // bottom
-  0x333333,
   0xaaaaaa, // top
-  0xaaaaaa,
   
   0x0000ff, // left
-  0x0000ff,
   0x00ff00, // right
-  0x00ff00,
   
   0xff0000, // front
-  0xff0000,
   0xff00ff, // back
-  0xff00ff,
+};
+
+static uint16_t vi = 0;
+static vertex vertices[6*3*2 * 4] = {
+  // currently space for a cube of quads (2x triangle) x4
+  // TODO: allocate or so
 };
 
 void addVertex(int16_t x, int16_t y, int16_t z)
@@ -1053,7 +1078,7 @@ static uint32_t texaddr = 0, texsize;
 
 void drawWorld(unrealptr& p, int tick) {
   //if (angle > 2) return;
-  float angle = M_PI * tick / 180;
+  float angle = M_PI * tick / 180 / 2;
   
   // clear z buffer w/ 2 forced triangles
   vertex v0, v1, v2;
@@ -1093,6 +1118,7 @@ void drawWorld(unrealptr& p, int tick) {
 #endif
   
   // in reverse order:
+#if 0
   mtxTranslate(mtx, 300, 200, 0);
   //mtxRotateX(mtx2, angle);
   //mtxRotateY(mtx2, angle);
@@ -1100,24 +1126,26 @@ void drawWorld(unrealptr& p, int tick) {
   mtxConcat(mtx, mtx2);
   mtxTranslate(mtx2, -150, -150, 0);
   mtxConcat(mtx, mtx2);
+#else
+  mtxRotateZ(mtx, angle);
+#endif
   
-  for (uint16_t i = 0, j = 0; i < vi; ++j) {
-    transform(vertices[i++], f0, mtx, true);
+  for (uint16_t i = 0; i < vi; ) {
+    const uint16_t j =  (i / 6) % ARRAY_SIZE(colors); // color
+    transform(vertices[i++], f0, mtx, true); // and project
     transform(vertices[i++], f1, mtx, true);
     transform(vertices[i++], f2, mtx, true);
-
-    s3v_3dtriangle(p, // xyz
-		   f0, f1, f2,
-		   colors[j], // ABGR
-		   colors[j],
-		   colors[j],
+    
+    s3v_3dtriangle(p,
+		   f0, f1, f2, // xyz
+		   colors[j], colors[j], colors[j], // ABGR
 		   ZB_NORMAL);
     //mark(p, v0[0], v0[1]);
   }
   
   if (true) {
     // rotating triangle coloring test
-    mtxTranslate(mtx, 100, 350, 0);
+    mtxTranslate(mtx, -200, 100, 0);
     mtxRotateZ(mtx2, angle);
     mtxConcat(mtx, mtx2);
     mtxTranslate(mtx2, -50, -50, 0);
@@ -1125,7 +1153,7 @@ void drawWorld(unrealptr& p, int tick) {
     
     v0[0] = 0; v1[0] = 100; v2[0] = 50;
     v0[1] = v1[1] = 100; v2[1] = 0;
-    v0[2] = v1[2] = v2[2] = 256;
+    v0[2] = v1[2] = v2[2] = 220;
     transform(v0, f0, mtx, true);
     transform(v1, f1, mtx, true);
     transform(v2, f2, mtx, true);
@@ -1425,8 +1453,12 @@ int main()
 
   if (virge) {
     // generate 3d world (or load file etc)
-    cube(100, 100, 256,  // xyz, from p1 to p2
-	 200, 200, 356);
+    const int16_t x = 50, y = 50, w = 100, h = 100;
+    cube(x, y, 256,  x+w, y+h, 356); // xyz, from p1 to p2
+    cube(x, -y, 256,  x+w, -y-h, 356);
+
+    cube(-x, y, 256,  -x-w, y+h, 356);
+    cube(-x, -y, 256,  -x-w, -y-h, 356);
     
     drawWorld(p, 0);
   }
@@ -1468,17 +1500,6 @@ int main()
       if (virge) {
 	//s3v_fill(p, 100, 100, 200, 200, 0); // test fill, now zbuffer!
 	drawWorld(p, ticks);
-	
-	// wait until engine idle TODO: use interrupt
-	for (uint32_t status = 0; !((status >> 13) & 1);) {
-	  status = p.get32(iobase + 0x8504); // Subsystem Status Register
-#if 0
-	  _CMD(p, 0x8504, status, "status");
-	  _CMD(p, 0x8504, (status >> 8) & 0x1f, "fifo free");
-	  _CMD(p, 0x8504, (status >> 13) & 1, "idle");
-	  if (dbgline > 25) dbgline = 0;
-#endif
-	}
       }
       
       {
@@ -1486,9 +1507,15 @@ int main()
 	sprintf(text, "%d ", ticks);
 	vga_blit_text(p, 0, 0, text, 0xffff, 0);
       }
+      
+      if (virge) {
+	// wait until engine idle TODO: use interrupt
+	waitEngine(p);
+	s3v_flip_frame(p);
+      }
     }
     
-    // only re-draw if it really was the mouse
+    // only re-position cursor, if it really was the mouse
     if (mx != lx || my != ly) {
       {
 	char text[24];
@@ -1516,10 +1543,6 @@ int main()
       //asm("int3\n");
       lx = mx, ly = my;
       s3_cursor_pos(lx, ly);
-    }
-    
-    if (virge) {
-      s3v_flip_frame(p);
     }
     
     if (kbhit()) {
