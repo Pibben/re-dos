@@ -10,6 +10,8 @@
  * copyright holder ExactCODE GmbH Germany.
  */
 
+#define DOS_WANT_ARGS 1
+
 #ifndef DOS
 #define DOS 1
 #endif
@@ -23,6 +25,7 @@ typedef unsigned char uchar;
 #include <stdarg.h>
 #include "dos.h"
 #include "libc/stdio.h"
+#include "libc/string.h"
 
 #include "vga.h"
 
@@ -69,11 +72,20 @@ void printmode(uint16_t mode, ModeInfoBlock& modeinfo)
 }
 
 extern "C"
-int main(void) 
+int main(int argc, const char** argv)
 {
   uint16_t ret;
-  
   printf("svgainfo, (c) Rene Rebe, ExactCODE; 2018\n");
+  
+  uint8_t list = 0;
+  for (; argc; --argc, ++argv) {
+    if (strcmp(*argv, "-l") == 0){
+      list = 1;
+    } else {
+      printf("no option: %s\n", *argv);
+      return 1;
+    }
+  }
   
   ret = svga_vbe_info(&vbeinfo);
   if (ret != 0x4f) {
@@ -88,30 +100,32 @@ int main(void)
     
     //printf("%x %x\n", seg, off);
     uint16_t mode;
-    bool gotmodes = false;
-    for (; (mode = p.get16(off)) != 0xffff; off += 2) {
-      if (!mode) {
-	printf("not really a vbe mode list?\n");
-	break;
-      }
-      
-      ret = svga_mode_info(mode, &modeinfo);
-      if (ret != 0x4f) {
-	printf("mode: %x: get info failed: %x\n", mode, ret);
-      } else {
-	gotmodes = true;
-	printmode(mode, modeinfo);
-      }
-    }
-    
-    if (!gotmodes) {
-      printf("trying std modes:\n");
-      for (uint16_t mode = 0x100; mode <= 0x11b; ++mode) {
+    if (list) {
+      bool gotmodes = false;
+      for (; (mode = p.get16(off)) != 0xffff; off += 2) {
+	if (!mode) {
+	  printf("not really a vbe mode list?\n");
+	  break;
+	}
+	
 	ret = svga_mode_info(mode, &modeinfo);
 	if (ret != 0x4f) {
-	  //printf("mode: %x: get info failed: %x\n", ret);
+	  printf("mode: %x: get info failed: %x\n", mode, ret);
 	} else {
+	  gotmodes = true;
 	  printmode(mode, modeinfo);
+	}
+      }
+      
+      if (!gotmodes) {
+	printf("trying std modes:\n");
+	for (uint16_t mode = 0x100; mode <= 0x11b; ++mode) {
+	  ret = svga_mode_info(mode, &modeinfo);
+	  if (ret != 0x4f) {
+	    //printf("mode: %x: get info failed: %x\n", ret);
+	  } else {
+	    printmode(mode, modeinfo);
+	  }
 	}
       }
     }

@@ -11,12 +11,57 @@
  */
 
 // has to be placed 1st in .TEXT by linker script
-// "naked" attribute new in gcc-8, not fully supported in clang
+// "naked" attribute new since gcc-7, do not supportd C in clang
+#ifndef DOS_NOSTART
+
+#ifdef DOS_WANT_ARGS
+extern "C" int main(int, const char**);
+
+static void __attribute__((noinline)) _main(char* psp) {
+  uint8_t argc = 0; // 1st count args, and tokenize
+  // we rely on the first being a space, also term'ed w/ 0xd
+  int8_t i, j, len = psp[0x80];
+  
+  for (i = 0; i < len; ++i)
+    if (psp[0x81 + i] ==  ' ') {
+      psp[0x81 + i] = 0; // zero terminate
+      ++argc;
+    }
+  psp[0x81 + i] = 0; // zero terminate, overwrite last 0xd :-/!
+  
+  {
+    // TODO: somehow the code below brekas with -fomit-frame-pointer!?
+    const char* argv[argc] = {}; // 2nd allocate and assign
+    // iterate again, we had to determine the argg stack size first
+    for (i = 0, j = 0; i < len && j < argc; ++i) {
+      if (psp[0x81 + i] == 0) {
+	argv[j] = psp + 0x81 + 1 + i;
+	++j;
+      }
+    }
+    main(argc, argv);
+  }
+}
+#else
+extern "C" int main();
+#endif
+
 static void __attribute__((section(".start"), naked, used)) start() {
-  asm("call main\n"
-      "mov $0x4c, %ah\n"
+#ifdef DOS_WANT_ARGS
+  char* psp;
+  // Program Segment Prefix in DS:BX
+  asm volatile (""
+		: "=b"(psp)/* ouptut */
+		: /* no inputs */
+		: /* no clobbers */);
+  _main(psp);
+#else
+  main();
+#endif
+  asm("mov $0x4c, %ah\n"
       "int $0x21\n");
 }
+#endif 
 
 void outb(uint16_t port, uint8_t val) {
   asm volatile ("outb %0, %1\n"
@@ -70,15 +115,71 @@ static void dos_print(char* string)
 		: "ah");
 }
 
-static int write(int fd, const char* buf, int len)
+static int16_t dos_errno;
+
+#define O_RDONLY 0
+#define O_WRONLY 1
+#define O_RDWR 2
+
+static int open(const char* file, int flags, int mode)
 {
+  dos_errno = 0;
+  int handle = 0;
+  asm volatile ("mov $0x3d, %%ah\n" // open file
+		"int $0x21\n"
+		"jnc 1f\n"
+		"mov %%ax, %[dos_errno]\n"
+		"1:\n"
+		: "=a"(handle), [dos_errno]"=rm"(dos_errno)
+		: "a"(mode), "d"(file)
+		: /* clobbers */);
+  return dos_errno ? 0 : handle;
+}
+
+static int close(int fd)
+{
+  dos_errno = 0;
+  asm volatile ("mov $0x3e, %%ah\n" // read from file
+		"int $0x21\n"
+		"jnc 1f\n"
+		"mov %%ax, %[dos_errno]\n"
+		"1:\n"
+		: [dos_errno]"=rm"(dos_errno)
+		: "b"(fd)
+		: "ah");
+  
+  return dos_errno;
+}
+
+static int read(int fd, void* buf, int len)
+{
+  dos_errno = 0;
+  uint16_t ret;
+  asm volatile ("int3\n"
+		"mov $0x3f, %%ah\n" // read from file
+		"int $0x21\n"
+		"jnc 1f\n"
+		"mov %%ax, %[dos_errno]\n"
+		"1:\n"
+		: "=a"(ret), [dos_errno]"=rm"(dos_errno)
+		: "d"(buf), "c"(len), "b"(fd)
+		: /* clobbers */);
+  return dos_errno ? 0 : ret;
+}
+
+static int write(int fd, const void* buf, int len)
+{
+  dos_errno = 0;
+  uint16_t ret;
   asm volatile ("mov $0x40, %%ah\n" // write to file
 		"int $0x21\n"
-		: /* no output */
+		"jnc 1f\n"
+		"mov %%ax, %[dos_errno]\n"
+		"1:\n"
+		: "=a"(ret), [dos_errno]"=rm"(dos_errno)
 		: "d"(buf), "c"(len), "b"(fd)
-		: "ah");
-  // TODO: return
-  return len;
+		: /* clobbers */);
+  return dos_errno ? 0 : ret;
 }
 
 
@@ -87,12 +188,12 @@ static bool kbhit()
     bool result;
     asm volatile ("mov $1, %%ah\n" // state of keyboard buffer
                   "int $0x16\n"
-                  "jnz .1\n"
+                  "jnz 1f\n"
                   "mov $0, %0\n"
-                  "jmp .2\n"
-                  ".1:\n"
+                  "jmp 2f\n"
+                  "1:\n"
                   "mov $1, %0\n"
-                  ".2:\n"
+                  "2:\n"
                   : "=rm"(result));
     return result;
 }
@@ -137,7 +238,7 @@ static void dos_setvect(uint8_t intr, void (*isr)())
 		"mov %%bx, %%dx\n"
 		"mov $0x25, %%ah\n" // setvect, DS:DX
 		"int $0x21\n"
-		"pop %%DS\n"
+		"pop %%ds\n"
 		: /* no output */
 		: "a"(intr), "d"(isr)
 		: "bx");  
@@ -156,6 +257,37 @@ static void dos_gettime(uint8_t* hour, uint8_t* min,
   if (min) *min = c & 0xf;
   if (sec) *sec = d >> 8;
   if (usec) *usec = d & 0xf;
+}
+
+static void* dos_malloc(uint32_t size)
+{
+  uint16_t addr = 0;
+  dos_errno = 0;
+  asm volatile ("mov $0x48, %%ah\n" // alloc
+		"int $0x21\n"
+		"jnc 1f\n"
+		"mov %%ax, %[dos_errno]\n"
+		"1:\n"
+		: "=a"(addr) , [dos_errno]"=rm"(dos_errno)
+		: "b"(size / 16)
+		: /* clobbers*/);
+  return dos_errno ? (void*)0 : (void*)(addr * 16); // linear
+}
+
+static void dos_free(void* addr)
+{
+  dos_errno = 0;
+  asm volatile ("push %%es\n"
+		"mov %%ax, %%es\n"
+		"mov $0x49, %%ah\n" // free
+		"int $0x21\n"
+		"pop %%es\n"
+		"jnc 1f\n"
+		"mov %%ax, %[dos_errno]\n"
+		"1:\n"
+		: [dos_errno]"=rm"(dos_errno)
+		: "a"((uint32_t)addr / 16)
+		: /* clobbers */);
 }
 
 static float dos_gettimef()
@@ -183,8 +315,8 @@ struct farptr {
     asm volatile ("push %%es\n"
 		  "mov %%dx, %%es\n"
 		  "pop %%dx\n"
-		  : "=dx"(old) /* no outputs */
-		  : "dx"(base)
+		  : "=d"(old) /* no outputs */
+		  : "d"(base)
 		  : /* no clobbers */);
   }
   

@@ -58,20 +58,7 @@ static const uint16_t freq2[] = {
 
 static void (*isr_system)();
 
-extern "C"
-// "naked" attribute new in gcc-8, not fully supported in clang
-void __attribute__((naked)) isr_timer()
-{
-  // save all, and establish DS, assuming our CS == DS
-  asm volatile (//"int3\n"
-		"pusha\n"
-		//"cli\n"
-		"mov %%cs, %%ax\n" // not needed in dosbox?
-		"mov %%ax, %%ds\n"
-		: /* no output */
-		: /* no input */
-		: /* no clobber*/);
- 
+static void __attribute__((noinline)) isr_timer2() {
   ++ticks;
   
   // call original
@@ -94,6 +81,23 @@ void __attribute__((naked)) isr_timer()
       fm_play_tone(i, (a * freq[i] + b * freq2[i]) / tticks, 63);
     }
   }
+}
+
+extern "C"
+// "naked" attribute new since gcc-7, do not support C in clang
+void __attribute__((naked)) isr_timer()
+{
+  // save all, and establish DS, assuming our CS == DS
+  asm volatile (//"int3\n"
+		"pusha\n"
+		//"cli\n"
+		"mov %%cs, %%ax\n" // not needed in dosbox?
+		"mov %%ax, %%ds\n"
+		: /* no output */
+		: /* no input */
+		: /* no clobber*/);
+  
+  isr_timer2();
   
   // return from interrupt
   asm volatile ("popa\n"
@@ -132,10 +136,9 @@ int main(void)
   
   if (!fm_detect()) {
     printf("ERROR: FM not detected \n");
-    //return 1;
+    return 1;
   }
-  else
-    printf("FM detected \n");
+  printf("FM detected \n");
   
   fm_reset();
   
@@ -146,12 +149,16 @@ int main(void)
     fm_play_tone(i, freq[i], 63);
   
   printf("running\n");
-  while (true)
-    ;
+  while (true) {
+    if (kbhit())
+      break;
+  }
   printf("end.\n");
+
+  for (uint8_t i = 0; i < sizeof(freq) / sizeof(*freq); ++i)
+    fm_stop_tone(i);
   
-  fm_stop_tone(0);
-  fm_stop_tone(1);
+  dos_setvect(timer_irq, isr_system);
   
   return 0;
 }

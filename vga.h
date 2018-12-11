@@ -11,7 +11,7 @@
  */
 
 uint16_t vga_w = 320, vga_h = 240;
-uint8_t vga_planes = 4;
+uint8_t vga_planes = 1;
 
 static const uint16_t MISC_OUTPUT = 0x3c2; // Miscellaneous Output register
 static const uint16_t SC_INDEX = 0x3c4; // Sequence Controller Index
@@ -55,8 +55,8 @@ static uint16_t svga_vbe_info(struct VbeInfoBlock* info)
 		"mov $0x4f00, %%ax\n"
 		"int $0x10\n"
 		"pop %%es\n"
-		: "=ax"(ret) /* outputs */
-		: "bx"(info) /* inputs */
+		: "=a"(ret) /* outputs */
+		: "b"(info) /* inputs */
 		: "di" );
   return ret;
 }
@@ -114,8 +114,8 @@ static uint16_t svga_mode_info(uint16_t mode, struct ModeInfoBlock* info)
 		"mov $0x4f01, %%ax\n"
 		"int $0x10\n"
 		"pop %%es\n"
-		: "=ax"(ret) /* outputs */
-		: "cx"(mode), "bx"(info) /* inputs */
+		: "=a"(ret) /* outputs */
+		: "c"(mode), "b"(info) /* inputs */
 		: "di" );
   return ret;
 }
@@ -126,7 +126,7 @@ static uint16_t svga_mode(uint16_t mode)
   uint16_t ret;
   asm volatile ("mov $0x4f02, %%ax\n"
 		"int $0x10\n"
-		: "=ax"(ret) /* outputs */
+		: "=a"(ret) /* outputs */
 		: "bx"(mode) /* inputs */
 		: /* no clobbers */);
   return ret;
@@ -138,7 +138,7 @@ static uint16_t svga_set_start(uint16_t x, uint16_t y)
   asm volatile ("mov $0x4f07, %%ax\n"
 		"mov $0, %%bx\n"
 		"int $0x10\n"
-		: "=ax"(ret) /* outputs */
+		: "=a"(ret) /* outputs */
 		: "cx"(x), "dx"(y) /* inputs */
 		: /* no clobbers */);
   return ret;
@@ -183,6 +183,8 @@ static void vga_mode_x()
   for (unsigned i = 0; i < sizeof(CRTParms) / sizeof(*CRTParms); ++i) {
     outw(CRTC_INDEX, CRTParms[i]);
   }
+  
+  vga_planes = 4;
 }
 
 static void vga_write_planes(uint8_t planes)
@@ -267,8 +269,7 @@ static uint8_t* getFontGlyph(uint16_t i) {
     uint32_t height;
     uint16_t mode = 0x0200; // 8x16, 0x600: 8x16
     uint32_t addr;
-    asm volatile ("int3\n"
-		  "push %%es\n"
+    asm volatile ("push %%es\n"
 		  "push %%bp\n"
 		  "mov $0x1130, %%ax\n"
 		  "int $0x10\n"
@@ -277,7 +278,7 @@ static uint8_t* getFontGlyph(uint16_t i) {
 		  "add %%bp, %%ax\n"
 		  "pop %%bp\n"
 		  "pop %%es\n"
-		  : "=eax"(addr), "=ecx"(height) /* outputs */
+		  : "=ea"(addr), "=ec"(height) /* outputs */
 		  : "b"(mode) /* inputs */
 		  : "dx" );
     fontaddr = addr;

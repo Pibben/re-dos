@@ -32,7 +32,7 @@ static volatile uint16_t ticks = 0;
 static void (*isr_system)();
 
 extern "C"
-// "naked" attribute new in gcc-8, not fully supported in clang
+// "naked" attribute new since gcc-7, do not support C in clang
 void __attribute__((naked)) isr_timer()
 {
   // save all, and establish DS, assuming our CS == DS
