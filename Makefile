@@ -11,7 +11,9 @@ include build/top.make
 cc-option = $(shell if $(CC) $(1) -S -o /dev/null -xc /dev/null \
             > /dev/null 2>&1; then echo "$(1)"; else echo "$(2)"; fi ;)
 
-CFLAGS += -I libc -s -Os -m32 -march=i386 -Wall -Wno-unused-function -fomit-frame-pointer # -Wno-format-security
+CFLAGS += -I libc -s -Os -m32 -march=i386 -fno-pic -no-pie -Wall -Wno-unused-function \
+    -mregparm=2 -fomit-frame-pointer -falign-functions=0 -falign-jumps=0 -falign-loops=0 \
+     # -Wno-format-security
 CXXFLAGS = $(CFLAGS) -fno-exceptions #-I stl/include
 CXXFLAGS += $(call cc-option,-fno-threadsafe-statics,)
 

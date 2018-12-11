@@ -11,15 +11,11 @@
  */
 
 // TODO:
-// * A20 gate hiccup?
-// * some (z-buffer fill) coordinates off-by-one, or so!?
+// * double check fractional triangle positions!
 // * finish & test double-buffer on real hw
-// * fractional triangle positions!
-// * test if we can trick the 3dtriangle to fill a quad ;-)
-// * double check color and z deltas
 // * 8 bit DST flat triangle (lines work!)
+// * full texture details & perspective correction
 // * some more software engine API
-// * s3d texture
 // * s3d wait for free FIFO?
 // * s3d ring buffer test example
 
@@ -45,6 +41,17 @@ typedef unsigned char uchar;
 #include "cursor.h"
 
 static uint32_t vga_fb = 0; // current frame base for double-buffering
+
+// re-define vga_blit_text for double_buffering
+
+static void _vga_blit_text(unrealptr& p, uint16_t x, uint16_t y,
+			   const char* t, uint32_t fg = 0xff, uint32_t bg = 0)
+{
+  // assumes one double-buffer directly follows after first
+  vga_blit_text(p, x, vga_fb == 0 ? y : vga_h + y, t, fg, bg);
+}
+#define vga_blit_text _vga_blit_text
+
 
 // RGB helpers
 static inline uint8_t RED(uint32_t v) 	{ return (v >> 0) & 0xff; }
@@ -257,7 +264,7 @@ enum s3vregs {
   TDS = 0xB530,
   TVS = 0xB534,
   TUS = 0xB538,
- 
+
   TdXdY12 = 0xB560, // geometry
   TXEND12 = 0xB564,
   TdXdY01 = 0xB568,
@@ -281,6 +288,19 @@ enum S3V_ZB_MODE {
   ZB_MUX = 1,
   ZB_MUX_DRAW = 2,
   ZB_NONE = 3,
+};
+
+enum S3V_TEX_FORMAT {
+  TC_ARGB8888 = 0,
+  TC_ARGB4444 = 1,
+  TC_ARGB1555 = 2,
+  TC_PALETTE8 = 6,
+  TC_YUYV16 = 7,
+};
+
+enum S3V_TEX_FILTER {
+  TF_1TPP = 4, // nearest
+  TF_4TPP = 6, // linear
 };
 
 void s3_line(unrealptr& p,
@@ -318,7 +338,6 @@ void SWAP(T& a, T& b) {
   a = b; b = t;
 }
 
-#if 0
 static uint8_t dbgline = 0;
 void LOG(unrealptr& p, const char* text)
 {
@@ -333,7 +352,6 @@ void _CMD(unrealptr& p, uint32_t r, uint32_t v, const char* s = 0)
   LOG(p, text);
   p.set32(iobase + r, v);
 }
-#endif
 
 void s3v_3dline(unrealptr& p,
 		int16_t x1, int16_t y1, uint16_t z1,
@@ -400,8 +418,8 @@ void s3v_3dline(unrealptr& p,
 
   const uint8_t clip = 1;
   if (clip) {
-    p.set32(iobase + 0xb0dc, 0 << 16 | vga_w-1); // CLIP_L_R
-    p.set32(iobase + 0xb0e0, 0 << 16 | vga_h-1); // CLIP_T_B
+    p.set32(iobase + 0xb0dc, 0 << 16 | (vga_w-1)); // CLIP_L_R
+    p.set32(iobase + 0xb0e0, 0 << 16 | (vga_h-1)); // CLIP_T_B
   }
 
   p.set32(iobase + 0xb100, (1 << 31) | // 3d
@@ -459,13 +477,17 @@ void s3v_line(unrealptr& p,
        | (mono << 8) | (draw << 5) | (dstfmt << 2) | (clip << 1) | (autox));
 }
 
+static int16_t _intrp2(uint16_t v0, uint16_t v1, int16_t d, uint16_t dy01, uint16_t dy, int16_t _dx) {
+  uint16_t v = v0 + d * dy01 / dy;
+  return v1 - v;
+}
 
 // TODO: texture, alpha, fog control
 void s3v_3dtriangle(unrealptr& p,
 		    vertexf v0, vertexf v1, vertexf v2,
 		    uint32_t c0, uint32_t c1, uint32_t c2,
 		    S3V_ZB_MODE zmode = ZB_NONE,
-		    uint32_t texaddr = 0, uint8_t texsize = 0)
+		    uint32_t texaddr = 0, uint8_t texlevel = 0, uint8_t texfmt = TC_ARGB8888)
 {
   // sort all points by y - the s3virge engine always draws bottom up :-/
   {
@@ -484,7 +506,7 @@ void s3v_3dtriangle(unrealptr& p,
   }
   
   // easier to read code below
-  float x0 = v0[0], y0 = v0[1],  z0 = v0[2],
+  float x0 = v0[0], y0 = v0[1], z0 = v0[2],
     x1 = v1[0], y1 = v1[1], z1 = v1[2],
     x2 = v2[0], y2 = v2[1], z2 = v2[2];
   
@@ -493,107 +515,178 @@ void s3v_3dtriangle(unrealptr& p,
   // 0´         ` 0
   const uint16_t stride = vga_w * vga_bytes;
   const int16_t dx = x1 - x0, dx2 = x2 - x0;
-  const uint16_t dy = y0 - y2, dy01 = y0 - y1, dy12 = y1 - y2;
+  // TODO: maybe dy on rounded to integer?
+  const int16_t dy = y0 - y2 + 1, dy12 = y1 - y2 + 1;
+  const int16_t dy01 = dy - dy12; 
   
   // avoid div0 exception
   if (dx == 0 || dy == 0 || y0 < 0)
     return;
   
   // xdir by intersecting points at y1
-  int _x2 = x0 + dx2 * dy01 / dy;
-  const uint8_t xdir = _x2 < x1; // draw left or right?
+  int16_t _dx = x0 + dx2 * dy01 / dy;
+  _dx = x1 - _dx;
+  const uint8_t xdir = _dx >= 0; // draw right to left or left to right
+  _dx = _dx != 0 ? ABS(_dx) : 1; // prevent div0
   
   // interpolate, construct a _p1 for x-delta
-#define intrp2(v0, v1, d) xdir ? v1 - (v0 + d * dy01 / dy) : (v0 + d * dy01 / dy) - v1;
+#define intrp2(v0, v1, d) _intrp2(v0, v1, d, dy01, dy, _dx)
   
   int16_t dr, dg, db, da;
   dr = RED(c2) - RED(c0); // 1st y-deltas directly
   dg = GREEN(c2) - GREEN(c0);
   db = BLUE(c2) - BLUE(c0);
   da = ALPHA(c2) - ALPHA(c0);
-  p.set32(iobase + TdGdY_dBdY, ((S87(dg)/dy) << 16) | ((S87(db)/dy) & 0xffff)); // Y color deltas
-  p.set32(iobase + TdAdY_dRdY, ((S87(da)/dy) << 16) | ((S87(dr)/dy) & 0xffff));
   p.set32(iobase + TGS_BS, (S87(GREEN(c0)) << 16) | S87(BLUE(c0))); // color start
   p.set32(iobase + TAS_RS, (S87(ALPHA(c0)) << 16) | S87(RED(c0)));
-  dr = intrp2(RED(c0), RED(c1), dr); // 2nd x-deltas at _p1
-  dg = intrp2(GREEN(c0), GREEN(c1), dg);
-  db = intrp2(BLUE(c0), BLUE(c1), db);
-  da = intrp2(ALPHA(c0), ALPHA(c1), da);
-  p.set32(iobase + TdGdX_dBdX, ((S87(dg)/dx) << 16) | ((S87(db)/dx) & 0xffff)); // X color deltas
-  p.set32(iobase + TdAdX_dRdX, ((S87(da)/dx) << 16) | ((S87(dr)/dx) & 0xffff));
+  p.set32(iobase + TdGdY_dBdY, ((S87(dg) / dy) << 16) | ((S87(db) / dy) & 0xffff)); // Y color deltas
+  p.set32(iobase + TdAdY_dRdY, ((S87(da) / dy) << 16) | ((S87(dr) / dy) & 0xffff));
+  p.set32(iobase + TdGdX_dBdX, ((S87(intrp2(GREEN(c0), GREEN(c1), dg)) / _dx) << 16) | ((S87(intrp2(BLUE(c0), BLUE(c1), db)) / _dx) & 0xffff)); // X color deltas
+  p.set32(iobase + TdAdX_dRdX, ((S87(intrp2(ALPHA(c0), ALPHA(c1), da)) / _dx) << 16) | ((S87(intrp2(RED(c0), RED(c1), dr)) / _dx) & 0xffff));
   
-  int16_t dzy = z2 - z0;
-  int16_t dzx = intrp2(z0, z1, dzy) ;
-  //printf("z: %d %d %d - %d\n", z0, z1, z2, _z2);
-  //printf("dz: %d %d %d\n", z0, dzx, dzy);
-  //printf("dz: %x %x %x\n", S16_15(z0), S16_15(dzx)/dx, S16_15(dzy)/dy);
-  p.set32(iobase + TdZdX, S16_15(dzx)/dx); // z-x delta S16.5
-  p.set32(iobase + TdZdY, S16_15(dzy)/dy); // z-y delta
+  int16_t dz = z2 - z0;
   p.set32(iobase + TZS, S16_15(z0)); // z-start
+  p.set32(iobase + TdZdY, S16_15(dz) / dy); // z-y delta S16.5
+  p.set32(iobase + TdZdX, S16_15(intrp2(z0, z1, dz)) / _dx); // z-x delta
   
   p.set32(iobase + 0xb4d8, vga_fb); // dst base
-  p.set32(iobase + 0xb4e4, stride << 16 | stride); // src & dst stride, TODO: src is texture!
+  p.set32(iobase + 0xb4e4, stride << 16 | (1 << texlevel)); // dst stride, src stride for flat textures
   
   p.set32(iobase + TYS, y0); // y start
   y0 = y0 - (int)y0; // Note: only leaving fractional part, for precision below: -v
-  p.set32(iobase + TXS, S11_20(x0)); // x start S11.20 // TODO:  + y0 * dx2
+  p.set32(iobase + TXS, S11_20(x0 + y0 * dx2 / dy)); // x start S11.20
   p.set32(iobase + TdXdY12, dy12 ? S11_20(x2 - x1) / dy12 : 0); // XY12 Delta S11.20
   p.set32(iobase + TXEND12, S11_20(x1)); // XEND12 S11.20 - TODO: more precise?
   p.set32(iobase + TdXdY01, dy01 ? S11_20(dx) / dy01 : 0); // XY01 Delta a S11.20
-  p.set32(iobase + TXEND01, S11_20(x0)); // X01 END S11.20 // TODO  + y0 * dx
+  p.set32(iobase + TXEND01, S11_20(x0 + (dy01 ? y0 * dx / dy01 : 0))); // X01 END S11.20
   p.set32(iobase + TdXdY02, S11_20(dx2) / dy); // X02 Delta S11.20
-  // v- left/right bit, always direction of largest y component! 
+  // v- left/right bit, always direction of largest y component!
   p.set32(iobase + TY01_Y12, (xdir << 31) | (dy01 << 16) | dy12); // y scan line count 01, 12
   
   if (texaddr) {
-    // TODO: non mipmap lat texture is src stride in reg above!
+    const uint8_t texshift = 27 - texlevel; // w/o perspective simply 8 bits less or so?
+    const uint16_t texsize = 1 << texlevel;
+
+    // texture - D is mipmap level, W perspective correction
+    // +->U
+    // V
+    
+    // TODO: more optional mip-maps details and texture location control
+    // looks like we need to set the mip-map level in any case!?, src_stride not used by pcem?
     p.set32(iobase + TEX_BASE, texaddr); // texture address
     
-    // TODO: 0xB4E4 SOURCE STRIDE for a flat (not mipmapped) texture!
+    p.set32(iobase + TBU, 0); // Triangle Base U Register (TBU) (4 + s).(16 - s)
+    p.set32(iobase + TBV, 0); // Triangle Base V Register (TBV) 
+    p.set32(iobase + TUS, 0); // Triangle U Start Register (TUS) S(4 + s).(27 - s) | S12.8.11
+    p.set32(iobase + TVS, (texsize - 1) << texshift); // Triangle V Start Register (TVS) …
+    p.set32(iobase + TdVdY, (1 << texshift) / dy * -texsize); // Triangle UY Delta Register (TdUdY) …
+    p.set32(iobase + TdUdY, 0); // Triangle VY Delta Register (TdVdY) …
+    p.set32(iobase + TdVdX, 0); // Triangle UX Delta Register (TdUdX) …
+    p.set32(iobase + TdUdX, (1 << texshift) / dx * texsize); // Triangle VX Delta Register (TdVdX) …
     
-    // texture - D is mipmap level?
-    // ->U
-    // V|
-    
-    //0xB504; // Triangle Base V Register (TBV) (4 + s).(16-s)
-    //0xB508; // Triangle Base U Register (TBU) …
-    //0xB534; // Triangle V Start Register (TVS) S(4 + s).(27 - s) | S12.8.11
-    //0xB538; // Triangle U Start Register (TUS) …
-    //0xB51C; // Triangle VX Delta Register (TdVdX) …
-    //0xB520; // Triangle UX Delta Register (TdUdX) …
-    //0xB528; // Triangle VY Delta Register (TdVdY) …
-    //0xB52C; // Triangle UY Delta Register (TdUdY) …
+    // perspective correction only:
+    // Triangle W Start Register (TWS) S12.19
+    // Triangle WY Delta Register (TdWdY) S12.19
+    // Triangle WX Delta Register (TdWdX) S12.19
     
     // mipmap level only:
-    //0xB530; // Triangle D Start Register (TDS) S4.27
-    //0xB518; // Triangle DX Delta Register (TdDdX) S4.27
-    //0xB524; // Triangle DY Delta Register (TdDdY) S4.27
-
-    // perspective correction only:
-    // 0xB510 Triangle WY Delta Register (TdWdY) S12.19
-    // 0xB514 Triangle W Start Register (TWS) S12.19
-    // 0xB50C triangle WX Delta Register (TdWdX) S12.19
+    // Triangle D Start Register (TDS) S4.27
+    // Triangle DX Delta Register (TdDdX) S4.27
+    // Triangle DY Delta Register (TdDdY) S4.27
   }
   
   const uint8_t cmd = texaddr ? 0x2 : 0; // unlit texture : gouraud shaded triangle
-  const uint8_t tw = 0; // texture wrap
+  const uint8_t tw = texaddr ? 1 : 0; // texture wrap
   const uint8_t zbmode = zmode & ZB_NONE; // AND our additional bit away
   const uint8_t zup = zbmode == ZB_NONE ? 0 : 1; // zbuffer update
   const uint8_t zcomp = zmode <= ZB_NONE ? 0x6 : 0x7; // zbuffer compare < or always
-  const uint8_t abc = 0; // alpha blend control, 2: texture, 3: sourcey
+  const uint8_t abc = 0; // alpha blend control, 0: no 2: texture, 3: source
   const uint8_t fog =  0;
-  const uint8_t tblend = 0; // texture blending mode
-  const uint8_t tfilter = texaddr ? 0x5 : 0; // texture filter mode - 1TPP
-  const uint8_t tfmt = texaddr ? 0x2 : 0; // texture blending - ARGB1555;
-  const uint8_t mipmap = texaddr ? 1 : 0; // max size
+  const uint8_t tfilter = texaddr ? TF_1TPP : 0; // texture filter mode
+  const uint8_t tfmt = texaddr ? texfmt : 0; // texture color format
+  const uint8_t tblend = texaddr ? 2 : 0; // texture blending mode - decal
+  const uint8_t mipmap = texaddr ? texlevel : 0; // max size
   const uint8_t dstfmt = vga_bytes - 1; // 8, 16, 24 bit
   const uint8_t autox = 0;
 
   // clipping
   const uint8_t clip = 1;
 #if 1
-  p.set32(iobase + 0xb4dc, 0 << 16 | vga_w-1); // CLIP_L_R
-  p.set32(iobase + 0xb4e0, 0 << 16 | vga_h-1); // CLIP_T_B
+  p.set32(iobase + 0xb4dc, 0 << 16 | (vga_w-1)); // CLIP_L_R
+  p.set32(iobase + 0xb4e0, 0 << 16 | (vga_h-1)); // CLIP_T_B
+#endif
+  
+  p.set32(iobase + 0xb500, (1 << 31) | // 3d
+	  (cmd << 27) | (tw << 26) | (zbmode << 24) | (zup << 23) |
+	  (zcomp << 20) | (abc << 18) | (fog << 17) | (tblend << 15) |
+	  (tfilter << 12) | (mipmap << 8) | (tfmt << 5) |
+	  (dstfmt << 2) | (clip << 1) | (autox));
+}
+
+// TODO: texture, alpha, fog control
+void s3v_3drect(unrealptr& p, vertexf v0, uint32_t c0,
+		S3V_ZB_MODE zmode = ZB_NONE)
+{
+  
+  //   2_  or  _2
+  //  /. 1    1. \
+  // 0´         ` 0
+  const uint16_t stride = vga_w * vga_bytes;
+  
+  // xdir by intersecting points at y1
+  const uint8_t xdir = 1; // draw right to left or left to right
+  const int16_t x0 = v0[0], y0 = v0[1],  z0 = v0[2];
+  const uint16_t dx = 1, dy = 1;
+  
+  const int16_t dr = 0, dg = 0, db = 0, da = 0;
+  p.set32(iobase + TGS_BS, (S87(GREEN(c0)) << 16) | S87(BLUE(c0))); // color start
+  p.set32(iobase + TAS_RS, (S87(ALPHA(c0)) << 16) | S87(RED(c0)));
+  p.set32(iobase + TdGdX_dBdX, ((S87(dg)/dx) << 16) | ((S87(db)/dx) & 0xffff)); // X color deltas
+  p.set32(iobase + TdGdY_dBdY, ((S87(dg)/dy) << 16) | ((S87(db)/dy) & 0xffff)); // Y color deltas
+  p.set32(iobase + TdAdX_dRdX, ((S87(da)/dx) << 16) | ((S87(dr)/dx) & 0xffff));
+  p.set32(iobase + TdAdY_dRdY, ((S87(da)/dy) << 16) | ((S87(dr)/dy) & 0xffff));
+  
+  const int16_t dzx = 0, dzy = 0;
+  //printf("z: %d %d %d - %d\n", z0, z1, z2, _z2);
+  //printf("dz: %d %d %d\n", z0, dzx, dzy);
+  //printf("dz: %x %x %x\n", S16_15(z0), S16_15(dzx)/dx, S16_15(dzy)/dy);
+  p.set32(iobase + TZS, S16_15(z0)); // z-start
+  p.set32(iobase + TdZdX, S16_15(dzx)/dx); // z-x delta S16.5
+  p.set32(iobase + TdZdY, S16_15(dzy)/dy); // z-y delta
+  
+  p.set32(iobase + 0xb4d8, vga_fb); // dst base
+  p.set32(iobase + 0xb4e4, stride << 16); // dst stride, lower src only for flat textures
+  
+  p.set32(iobase + TXS, S11_20(0)); // x start S11.20
+  p.set32(iobase + TYS, y0); // y start
+  p.set32(iobase + TdXdY12, 0); // XY12 Delta S11.20
+  p.set32(iobase + TXEND01, S11_20(x0)); // X01 END S11.20
+  p.set32(iobase + TXEND12, S11_20(0)); // XEND12 S11.20
+  p.set32(iobase + TdXdY01, S11_20(0)); // XY01 Delta S11.20
+  p.set32(iobase + TdXdY02, S11_20(0)); // X02 Delta S11.20
+  // v- left/right bit, always direction of largest y component!
+  p.set32(iobase + TY01_Y12, (xdir << 31) | ((y0 + 1) << 16) | 0); // y scan line count 01, 12
+  
+  const uint32_t texaddr = 0;
+  const uint8_t cmd = texaddr ? 0x2 : 0; // unlit texture : gouraud shaded triangle
+  const uint8_t tw = 0; // texture wrap
+  const uint8_t zbmode = zmode & ZB_NONE; // AND our additional bit away
+  const uint8_t zup = zbmode == ZB_NONE ? 0 : 1; // zbuffer update
+  const uint8_t zcomp = zmode <= ZB_NONE ? 0x6 : 0x7; // zbuffer compare < or always
+  const uint8_t abc = 0; // alpha blend control, 2: texture, 3: source
+  const uint8_t fog =  0;
+  const uint8_t tblend = 0; // texture blending mode
+  const uint8_t tfilter = texaddr ? TF_1TPP : 0; // texture filter mode - 1TPP
+  const uint8_t tfmt = texaddr ? 0x2 : 0; // texture format
+  const uint8_t mipmap = texaddr ? 1 : 0; // max size
+  const uint8_t dstfmt = vga_bytes - 1; // 8, 16, 24 bit
+  const uint8_t autox = 0;
+  
+  // clipping
+  const uint8_t clip = 1;
+#if 1
+  p.set32(iobase + 0xb4dc, 0 << 16 | (vga_w-1)); // CLIP_L_R
+  p.set32(iobase + 0xb4e0, 0 << 16 | (vga_h-1)); // CLIP_T_B
 #endif
   
   p.set32(iobase + 0xb500, (1 << 31) | // 3d
@@ -858,7 +951,7 @@ void mtxRotateZ(float mtx[4][4], float angle)
 
 void mtxConcat(float a[4][4], float b[4][4])
 {
-  static float m[4][4];
+  float m[4][4];
   for (int i = 0; i < 4; ++i) {
     for (int j = 0; j < 4; ++j) {
       register float v = 0;
@@ -868,9 +961,12 @@ void mtxConcat(float a[4][4], float b[4][4])
       m[i][j] = v;
     }
   }
-  
-  memcpy(a, m, sizeof(m));
-}  
+  for (int i = 0; i < 4; ++i) {
+    for (int j = 0; j < 4; ++j) {
+      a[i][j] = m[i][j];
+    }
+  }
+}
 
 static float mtx2[4][4], mtx[4][4];
 
@@ -953,16 +1049,16 @@ void setV(vertexf& v, int16_t x, int16_t y, int16_t z)
   v[2] = z;
 }
 
-void drawWorld(unrealptr& p, float angle) {
-  //if (angle > 2) return;
-  angle = M_PI * angle / 180;
-  
-  //vga_mode(0x03); // back to text mode
+static uint32_t texaddr = 0, texsize;
 
+void drawWorld(unrealptr& p, int tick) {
+  //if (angle > 2) return;
+  float angle = M_PI * tick / 180;
+  
   // clear z buffer w/ 2 forced triangles
   vertex v0, v1, v2;
-
-  vertexf f0 = {0, vga_h, 0x7fff}, f1 = {vga_w, 0, 0x7fff}, f2 = {0, 0, 0x7fff};
+  vertexf f0 = {0, vga_h - 1, 0x7fff}, f1 = {vga_w - 1, 0, 0x7fff}, f2 = {0, 0, 0x7fff};
+#if 0
   s3v_3dtriangle(p,
 		 f0, f1, f2,
 		 0, 0, 0,
@@ -972,7 +1068,13 @@ void drawWorld(unrealptr& p, float angle) {
 		 f0, f1, f2,
 		 0, 0, 0,
 		 (S3V_ZB_MODE)(ZB_NORMAL | 0x4)); // cmp always
+#else
+  // our "tricked" straight rect fill ;-)
+  f2[0] = vga_w - 1, f2[1] = vga_h - 1;
+  s3v_3drect(p, f2, 0,
+	     (S3V_ZB_MODE)(ZB_NORMAL | 0x4)); // cmp always
   
+#endif
   
 #if 1
   // synthetic, basic z-buffer test
@@ -989,7 +1091,6 @@ void drawWorld(unrealptr& p, float angle) {
 		 f0, f1, f2,
 		 0xff0000, 0xff0000, 0xff0000, ZB_NORMAL);
 #endif
-  //exit(1);
   
   // in reverse order:
   mtxTranslate(mtx, 300, 200, 0);
@@ -1032,12 +1133,32 @@ void drawWorld(unrealptr& p, float angle) {
 		   f0, f1, f2,
 		   0xff, 0xff00, 0xff0000,
 		   ZB_NORMAL);
-  } 
+  }
+
+  if (true) {
+    // texture test
+    int16_t s = tick % 100 - 50; // -50 .. 50
+    s = s >= 0 ? s : -s; // 50 .. 0 .. 50
+    const int16_t x = 400 - s, y = 250 - s;
+    const int16_t w = 150 + 2 * s - 1, h = 150 + 2 * s - 1;
+    f0[0] = f2[0] = x; f1[0] = x + w;
+    f0[1] = f1[1] = y; f2[1] = y + h;
+    f0[2] = f1[2] = f2[2] = 0;
+    
+    s3v_3dtriangle(p,
+		   f0, f1, f2,
+		   0x000000ff, 0x0000ff00,  0x00ff0000, // ARGB
+		   ZB_NORMAL, texaddr, texsize /* 2^s*, */, TC_ARGB8888);
+    f0[0] = f1[0]; f0[1] = f2[1];
+    s3v_3dtriangle(p,
+		   f0, f1, f2,
+		   0x000000ff, 0x0000ff00,  0x00ff0000, // ARGB
+		   ZB_NORMAL, texaddr, texsize /* 2^s*, */, TC_ARGB8888);
+  }
 }
 
 static void s3v_flip_frame(unrealptr& p)
 {
-  return;
   // program next, finished drawn frame
   p.set32(iobase + 0x81cc, vga_fb ? 1 : 0); // Double Buffer/LPB Support
   
@@ -1050,7 +1171,10 @@ int main()
 {
   uint16_t ret;
   printf("S3/Trio/Virge accel tests, (c) Rene Rebe, ExactCODE; 2018\n");
-  
+
+  unrealptr p(0);
+
+
   uint8_t virge = false;
   // unlock s3 registers and try to detect
   {
@@ -1112,7 +1236,7 @@ int main()
     printf("%x\n", modeinfo.PhysBasePtr);
   }
   
-  unrealptr p(modeinfo.PhysBasePtr);
+  p.rebase(modeinfo.PhysBasePtr);
   
   vga_w = modeinfo.XResolution;
   vga_h = modeinfo.YResolution;
@@ -1120,7 +1244,7 @@ int main()
   vga_bits = modeinfo.BitsPerPixel;
   vga_bytes = (modeinfo.BitsPerPixel + 7) / 8; // rounding for 15
   
-  // keep track of reserved graphic memory
+  // keep track of used graphic memory
   uint32_t fb_addr = vga_w * vga_bytes * vga_h; // reserve at least one frame
   
   if (virge) { // && modeinfo.BitsPerPixel == 32) {
@@ -1164,7 +1288,7 @@ int main()
     p.set32(iobase + 0x81FC, 0x00010001); // Secondary Stream Window Size
     p.set32(iobase + 0x8200, 0x00006088); // FIFO Control - Enable
     
-    //fb_addr += fb_addr; // double buffered
+    fb_addr += fb_addr; // double buffered
   }
   
   mouse_set_max(vga_w, vga_h);
@@ -1204,8 +1328,8 @@ int main()
     }
   }
 
-  // TODO: does somehow corrupt something!
-  if (false) {
+  // w/o a20 we can only access every other MB, ...
+  if (true) {
     // enable A20 gate, if necessary
     if (!a20_enable()) {
       printf("a20 error\n");
@@ -1261,14 +1385,36 @@ int main()
     p.set32(iobase + 0xB4D4, zaddr); // Z_BASE 3dtriangles
     p.set32(iobase + 0xB4e8, vga_w * 2); // Z_STRIDE
     
-    // test texture at next free vram/gpu address
-    if (false) {
-      // ater frame(s), z-buffer, etc!
-      // our demo uses A1B5G5R5, 2x2 texture:
-      p.set16(fb_addr + 0, 0b11111); // R
-      p.set16(fb_addr + 2, 0b1111100000); // G
-      p.set16(fb_addr + 4, 0b111110000000000); //B
-      p.set16(fb_addr + 6, 0xffff); // white
+    // last but not least a texture, at next free vram/gpu address
+    // after frame(s), z-buffer, etc!
+    // our demo uses A1B5G5R5, valid sizes: 2^3 ... 2^9?
+    texaddr = fb_addr;
+    texsize = 1; // 2^1 = 2x2
+    p.set16(texaddr + 0, 0b11111); // R
+    p.set16(texaddr + 2, 0b1111100000); // G
+    p.set16(texaddr + 4, 0b111110000000000); //B
+    p.set16(texaddr + 6, 0b111111111111111); // white
+    
+    // try to load a fancy texture ;-), RGB888 for now
+    int fd = open("lena.tex", 0, O_RDONLY);
+    if (fd) {
+      const unsigned bufsize = 512 / 3 * 3; // align to one texel size
+      uint8_t buf[bufsize];
+      int i = 0;
+      while (true) {
+	int ret = read(fd, buf, sizeof(buf));
+	if (!ret)
+	  break;
+	for (int j = 0; j < ret; i += 4, j += 3) {
+	  // expand RGB888 to ARGB8888
+	  p.set8(texaddr + i + 0, buf[j + 2]);
+	  p.set8(texaddr + i + 1, buf[j + 1]);
+	  p.set8(texaddr + i + 2, buf[j + 0]);
+	  p.set8(texaddr + i + 3, 0xff);
+	}
+      }
+      texsize = 7;
+      close(fd);
     }
   }
   
@@ -1283,19 +1429,6 @@ int main()
 	 200, 200, 356);
     
     drawWorld(p, 0);
-    
-    // WIP: texture test
-#if 0
-    s3v_3dtriangle(p,
-		   100, 200, 0, // X, Y, Z
-		   200, 100, 0,
-		   100, 100, 0,
-		   0x000000ff, // ABGR
-		   0x0000ff00,
-		   0x00ff0000
-		   , tex_addr, 1 // 2^s
-		   );
-#endif
   }
 
   // test all quadrants ;-)
@@ -1320,11 +1453,40 @@ int main()
   dos_setvect(timer_irq, (void(*)()) (((int)cs << 16) | (int)isr_timer));
 
   uint16_t lx = 0, ly = 0; // last
-  int lticks = 0;
+  int lticks = 0; uint8_t update = 1;
   while (true) {
     asm("hlt\n"); // sleep until next interrupt
-    
     // if we are here, we (probably) got an interrupt
+
+    if (ticks != lticks) {
+      if (update)
+	lticks = ticks;
+      else
+	ticks = lticks;
+      
+      // draw virge world 1st, as it clears the screen
+      if (virge) {
+	//s3v_fill(p, 100, 100, 200, 200, 0); // test fill, now zbuffer!
+	drawWorld(p, ticks);
+	
+	// wait until engine idle TODO: use interrupt
+	for (uint32_t status = 0; !((status >> 13) & 1);) {
+	  status = p.get32(iobase + 0x8504); // Subsystem Status Register
+#if 0
+	  _CMD(p, 0x8504, status, "status");
+	  _CMD(p, 0x8504, (status >> 8) & 0x1f, "fifo free");
+	  _CMD(p, 0x8504, (status >> 13) & 1, "idle");
+	  if (dbgline > 25) dbgline = 0;
+#endif
+	}
+      }
+      
+      {
+	char text[24];
+	sprintf(text, "%d ", ticks);
+	vga_blit_text(p, 0, 0, text, 0xffff, 0);
+      }
+    }
     
     // only re-draw if it really was the mouse
     if (mx != lx || my != ly) {
@@ -1333,9 +1495,8 @@ int main()
 	sprintf(text, "%d %d   ", mx, my);
 	vga_blit_text(p, 8, 8, text, 0xffff, 0);
       }
-
-      uint32_t color = ticks ? random() : 0x828282;
       
+      uint32_t color = ticks ? random() : 0x828282;
       // draw test line
       if (false) {
 	// clear previous
@@ -1351,32 +1512,22 @@ int main()
 	s3_line(p, vga_w / 2, vga_h / 2, mx, my, color);
       else
 	s3v_line(p, vga_w / 2, vga_h / 2, mx, my, color);
-
+      
       //asm("int3\n");
       lx = mx, ly = my;
       s3_cursor_pos(lx, ly);
     }
     
-    if (ticks != lticks) {
-      {
-	char text[24];
-	sprintf(text, "%d ", ticks);
-	vga_blit_text(p, 0, 0, text, 0xffff, 0);
-      }
-      
-      lticks = ticks;
-      if (virge) {
-	//s3v_fill(p, 100, 100, 200, 200, 0); // test fill, now zbuffer!
-	drawWorld(p, ticks);
-	
-	s3v_flip_frame(p);
-      }
+    if (virge) {
+      s3v_flip_frame(p);
     }
     
     if (kbhit()) {
       uint8_t c = getch();
       if (c == 'q') {
 	break;
+      } else if (c == ' ') {
+	update = !update;
       }
     }
   }

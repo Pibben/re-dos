@@ -431,6 +431,10 @@ struct unrealptr {
     enable();
   }
   
+  void rebase(uint32_t linear) {
+    offset = linear;
+  }
+  
   void enable() {
     struct __attribute__ ((packed)) {
       uint16_t limit : 16;
@@ -473,7 +477,7 @@ struct unrealptr {
 		  "mov $1, %%eax\n" // set pmode bit
 		  "mov %%eax, %%cr0\n"
 		  "jmp .+2\n" // some 3/486 need to clear the prefetch queue!
-		  "mov $0x10, %%ebx\n" // 2nd, d    struct __attribute__ ((packed)) {
+		  "mov $0x10, %%ebx\n" // 2nd descriptor, 1st is NULL
 		  "mov %%ebx, %%gs\n" // load a pmode descriptor into the %g-segment
 		  "and $0xfe, %%al\n" // disable pmode, back to real mode :-/
 		  "mov %%eax, %%cr0\n"
@@ -540,7 +544,7 @@ struct unrealptr {
   }
 
 protected:
-  const uint32_t offset;
+  uint32_t offset;
 };
 
 const char* getenv(const char* name)
