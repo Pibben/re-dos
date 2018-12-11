@@ -11,13 +11,34 @@
  */
 
 uint16_t vga_w = 320, vga_h = 240;
-uint8_t vga_planes = 1;
+uint8_t vga_planes = 1, vga_bytes = 1, vga_bits = 8;
 
 static const uint16_t MISC_OUTPUT = 0x3c2; // Miscellaneous Output register
 static const uint16_t SC_INDEX = 0x3c4; // Sequence Controller Index
 static const uint16_t GC_INDEX = 0x3ce; // Graphics Controller Index
 static const uint16_t CRTC_INDEX = 0x3d4; // CRT Controller Index
 static const uint16_t INPUT_STATUS_1 = 0x3da; // Input Status 1 register
+
+static uint8_t vga_read_crtc(uint8_t cr)
+{
+  outb(CRTC_INDEX, cr); 
+  return inb(CRTC_INDEX + 1);
+}
+
+static void vga_write_crtc(uint8_t cr, uint8_t v, uint8_t mask = 0)
+{
+  if (!mask) {
+    // w/o previous value, optimized to one 16-bit write
+    //outb(CRTC_INDEX, cr); 
+    //outb(CRTC_INDEX + 1, v); 
+    outw(CRTC_INDEX, (v << 8) | cr); 
+  } else {
+    outb(CRTC_INDEX, cr); 
+    uint8_t _ = inb(CRTC_INDEX + 1);
+    v |= _ & mask;
+    outb(CRTC_INDEX + 1, v);
+  }
+}
 
 // Switch to VGA mode.
 static void vga_mode(uint16_t mode)
@@ -306,7 +327,7 @@ static uint8_t* getFontGlyph(uint16_t i) {
 
 template<typename T>
 void vga_blit_text(T& p, uint16_t _startx, uint16_t _starty,
-		   const char* text, uint8_t fg = 0xff, uint8_t bg = 0)
+		   const char* text, uint32_t fg = 0xff, uint32_t bg = 0)
 {
   for (uint8_t plane = 0; plane < vga_planes; ++plane) {
     if (vga_planes > 1)
@@ -322,7 +343,20 @@ void vga_blit_text(T& p, uint16_t _startx, uint16_t _starty,
 	uint8_t grow = glyph[y];
 	for (uint16_t x = plane; x < 8; x += vga_planes) {
 	  const uint8_t bit = grow & (0x80 >> x);
-	  p.set8(starty + ((startx + x) / vga_planes), bit ? fg : bg);
+	  const uint32_t px = starty + ((startx + x) / vga_planes);
+	  switch (vga_bits) {
+	  case 8:
+	    p.set8(px, bit ? fg : bg); break;
+	  case 15:
+	  case 16:
+	    p.set16(px * 2, bit ? fg : bg); break;
+	  case 24:
+	    p.set8(px * 3 + 0, (bit ? fg : bg) >> 0);
+	    p.set8(px * 3 + 1, (bit ? fg : bg) >> 1);
+	    p.set8(px * 3 + 2, (bit ? fg : bg) >> 2); break;
+	  case 32:
+	    p.set32(px * 4, bit ? fg : bg); break;
+	  }
 	}
       }
     }

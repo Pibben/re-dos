@@ -25,10 +25,9 @@ typedef unsigned char uchar;
 #include "libc/stdio.h"
 
 #include "vga.h"
+#include "cursor.h"
 
 struct ModeInfoBlock modeinfo;
-
-
 uint16_t mx, my, c;
 
 static void __attribute__((noinline)) isr_mouse2() {
@@ -71,33 +70,14 @@ void __attribute__((naked)) isr_mouse()
 		: /* no clobber*/);
 }
 
-uint8_t cursor[16][8] = {
-  {2, 0, 0, 0, 0, 0, 0, 0},
-  {2, 2, 0, 0, 0, 0, 0, 0},
-  {2, 1, 2, 0, 0, 0, 0, 0},
-  {2, 1, 1, 2, 0, 0, 0, 0},
-  {2, 1, 1, 1, 2, 0, 0, 0},
-  {2, 1, 1, 1, 1, 2, 0, 0},
-  {2, 1, 1, 1, 1, 1, 2, 0},
-  {2, 1, 1, 1, 1, 1, 1, 2},
-  {2, 1, 1, 1, 1, 1, 2, 0},
-  {2, 1, 1, 1, 1, 2, 0, 0},
-  {2, 1, 2, 2, 2, 2, 0, 0},
-  {2, 2, 0, 0, 2, 2, 0, 0},
-  {0, 0, 0, 0, 0, 2, 2, 0},
-  {0, 0, 0, 0, 0, 2, 2, 0},
-  {0, 0, 0, 0, 0, 0, 2, 2},
-  {0, 0, 0, 0, 0, 0, 2, 0},
-};
-
 void draw_cursor(unrealptr& p, uint16_t mx, uint16_t my)
 {
   // clip to vga_w
-  uint16_t xmax = vga_w - mx;
-  if (xmax > 8) xmax = 8;
+  uint16_t xmax = ARRAY_SIZE(*cursor);
+  if (vga_w - mx < xmax) xmax = vga_w - mx;
   else if (xmax <= 0) return;
   
-  for (uint8_t _y = 0; _y < 16; ++_y) {
+  for (uint8_t _y = 0; _y < ARRAY_SIZE(cursor); ++_y) {
     uint32_t offset = (my + _y) * vga_w + mx;
     for (uint8_t _x = 0; _x < xmax; ++_x) {
       uint8_t c = cursor[_y][_x];
@@ -206,7 +186,7 @@ int main()
       break;
   }
   
-  vga_mode(0x03); // back ot text mode
+  vga_mode(0x03); // back to text mode
   
   mouse_swapvect(&orig_mask, orig_isr);
   

@@ -10,14 +10,29 @@
  * copyright holder ExactCODE GmbH Germany.
  */
 
+#ifndef ARRAY_SIZE
+// TODO: maybe more somewhere nicer?
+#define ARRAY_SIZE(x) (sizeof(x) / sizeof(*x))
+#endif
+
 static char* psp;
+
+#ifndef __cplusplus
+typedef enum {
+  false = 0,
+  true = 1,
+} bool;
+#endif
 
 // has to be placed 1st in .TEXT by linker script
 // "naked" attribute new since gcc-7, do not supportd C in clang
 #ifndef DOS_NOSTART
 
 #ifdef DOS_WANT_ARGS
-extern "C" int main(int, const char**);
+#ifdef __cplusplus
+extern "C"
+#endif
+int main(int, const char**);
 
 static int __attribute__((noinline)) _main() {
   uint8_t argc = 0; // 1st count args, and tokenize
@@ -45,8 +60,19 @@ static int __attribute__((noinline)) _main() {
   }
 }
 #else
-extern "C" int main();
+#ifdef __cplusplus
+extern "C"
 #endif
+ int main();
+#endif
+
+void __attribute__((noreturn)) exit(int ret) {
+  asm volatile ("mov $0x4c, %%ah\n"
+		"int $0x21\n"
+		: /* no outputs */
+		: "a"(ret)
+		: /* no clobbers */);
+}
 
 static void __attribute__((section(".start"), naked, used)) start() {
 #ifdef DOS_WANT_ARGS
@@ -59,8 +85,7 @@ static void __attribute__((section(".start"), naked, used)) start() {
 #else
   uint8_t ret = main();
 #endif
-  asm("mov $0x4c, %ah\n"
-      "int $0x21\n");
+  exit(ret);
 }
 #endif 
 
@@ -199,15 +224,19 @@ static bool kbhit()
     return result;
 }
 
-static int getch()
+static uint8_t getch(const bool scancode
+#ifdef __cplusplus
+		     = false
+#endif
+		     )
 {
-  int key = 0;
+  uint16_t key = 0;
   if (kbhit()) {
     asm volatile ("mov $0, %%ah\n" // read key press
                   "int $0x16\n"
                   : "=a"(key));
   }
-  return key;
+  return scancode ? key >> 8 : key & 0xff;
 }
 
 // Warning: output is raw, real-mode seg:offset!
@@ -301,10 +330,20 @@ static float dos_gettimef()
 static void putchar(char ch)
 {
   // we can only call DOS w/ data-segment pointers, ...
-  static char c[1]= {ch};
+  char c[1] = {ch};
   write(1, c, sizeof(c));
 }
 
+inline const uint16_t _segment(uint32_t farp) {
+  return farp >> 16;
+}
+
+inline const uint32_t _offset(uint32_t farp) {
+  return farp & 0xffff;
+}
+
+
+#ifdef __cplusplus
 
 struct farptr {
   farptr(uint32_t base)
@@ -368,19 +407,18 @@ struct farptr {
 		  : /* no outputs */
 		  : "b"(index), "c"(val)
 		  : /* no clobbers */);
- };
+  }
+  
+  void set32(uint16_t index, uint16_t val) {
+     asm volatile ("mov %%ecx, %%es:(%%bx)"
+		  : /* no outputs */
+		  : "b"(index), "c"(val)
+		  : /* no clobbers */);
+  }
   
 protected:
   const uint16_t base; uint16_t old;
 };
-
-inline const uint16_t _segment(uint32_t farp) {
-  return farp >> 16;
-}
-
-inline const uint32_t _offset(uint32_t farp) {
-  return farp & 0xffff;
-}
 
 struct unrealptr {
   unrealptr(uint32_t linear)
@@ -428,8 +466,6 @@ struct unrealptr {
     
     gdtinfo.base = (void*)(((int)ds << 4) + (int)(gdt));
     
-    // TODO: A20 gate, some legacy systems may have it disabled!
-    
     // setup GDT, jump to protected mode, and back
     asm volatile ("cli\n"
 		  "lgdt %0\n"
@@ -450,7 +486,6 @@ struct unrealptr {
   
   uint8_t get8(uint32_t index) {
     index += offset;
-
     uint8_t val;
     asm volatile ("mov %%gs:(%1), %0"
 		  : "=q"(val)
@@ -462,9 +497,9 @@ struct unrealptr {
   uint16_t get16(uint32_t index) {
     index += offset;
     uint16_t val;
-    asm volatile ("mov %%gs:(%%ebx), %%cx"
-		: "=c"(val)
-		: "ebx"(index)
+    asm volatile ("mov %%gs:(%1), %0"
+		  : "=q"(val)
+		  : "bSD"(index)
 		  : /* no clobbers */);
     return val;
   }
@@ -472,9 +507,9 @@ struct unrealptr {
   uint32_t get32(uint32_t index) {
     index += offset;
     uint32_t val;
-    asm volatile ("mov %%gs:(%%ebx), %%ecx"
-		: "=c"(val)
-		: "ebx"(index)
+    asm volatile ("mov %%gs:(%1), %0"
+		  : "=q"(val)
+		  : "bSD"(index)
 		  : /* no clobbers */);
     return val;
   }
@@ -490,18 +525,18 @@ struct unrealptr {
   
   void set16(uint32_t index, uint16_t val) {
     index += offset;
-     asm volatile ( "mov %1, %%gs:(%0)"
-		    : /* no outputs */
-		    : "bSD"(index), "q"(val)
-		    : /* no clobbers */);
+    asm volatile ("mov %1, %%gs:(%0)"
+		  : /* no outputs */
+		  : "bSD"(index), "q"(val)
+		  : /* no clobbers */);
   }
   
   void set32(uint32_t index, uint32_t val) {
     index += offset;
-     asm volatile ( "mov %1, %%gs:(%0)"
-		    : /* no outputs */
-		    : "bSD"(index), "q"(val)
-		    : /* no clobbers */);
+    asm volatile ("mov %1, %%gs:(%0)"
+		  : /* no outputs */
+		  : "bSD"(index), "q"(val)
+		  : /* no clobbers */);
   }
 
 protected:
@@ -548,6 +583,128 @@ const char* getenv(const char* name)
   
   return 0;
 }
+
+// A20 gate, BIOS / DOS systems may come up disabled
+
+bool a20_test() {
+  const uint16_t test_addr = 0x80 * 4;
+  const uint16_t test_addr2 = test_addr + 0x10;
+  farptr p1(0x00000);
+  const uint32_t vorig = p1.get32(test_addr);
+  farptr p2(0xffff0); // last wrapping segment
+  
+  // test A20 gate - using farptr, and some high INT vector!
+  
+  // p2 should be last enabled
+  uint32_t v1, v2;
+  /*p2.enable();*/ v1 = ~p2.get32(test_addr2);
+  p1.enable(); p1.set32(test_addr, v1);
+  p2.enable(); v2 = p2.get32(test_addr2);
+  p1.enable(); p1.set32(test_addr, vorig); // restore just in case
+  //printf("%x %x\n", v1, v2);
+  
+  return v1 != v2;
+}
+
+static void kbd_wait_empty() {
+  uint8_t status;
+  while(status = inb(0x64) & 2) {
+    //printf("kbd: %x", status);// wait buffer empty
+  }
+}
+
+static bool a20_enable() {
+  if (a20_test()) return true;
+  
+  // 1st try bios
+  uint16_t status = 0x8600;
+  asm volatile ("mov $0x2401, %%ax\n" // A20 activate
+		"int $0x15\n"
+		: "=a"(status)
+		:
+		:);
+  if (a20_test()) return true;
+  
+  // 2nd try fast, works in dosbox
+  uint8_t v = inb(0x92); // PS/2
+  outb(0x92, (v | 2) & 0xfe); // not reset!
+  
+  if (a20_test()) return true;
+  
+  //v = inb(0xee); // some alt systems?
+  
+  // 3rd try keyboard - works in pcem/430fx
+  asm volatile("cli\n");
+  kbd_wait_empty();
+  outb(0x64, 0xd1); // kbd ctrl command
+  kbd_wait_empty();
+  outb(0x60, 0xdf); // a20 on
+  kbd_wait_empty();
+  outb(0x60, 0xff); // null command for some UHCI emulation?
+  kbd_wait_empty();
+  asm volatile("sti\n");
+  
+  return a20_test();
+}
+
+#else
+
+__seg_gs void* unrealptr(uint32_t base) {
+  struct __attribute__ ((packed)) {
+    uint16_t limit : 16;
+    uint16_t base : 16;
+    uint8_t base2 : 8;
+    uint8_t access : 8;
+    uint8_t limit2 : 4;
+    uint8_t flags : 4;
+    uint8_t baseHi : 8;
+  } gdt[] = {
+    // 0x00 NULL descriptor
+    {},
+    // 0x08 code
+    {.limit=0xffff,.base=0,.base2=0,.access=0x9a,.limit2=0xf,.flags=0xc,.baseHi=0},
+    // 0x10 data
+    {.limit=0xffff,.base=0,.base2=0,.access=0x92,.limit2=0xf,.flags=0xc,.baseHi=0},
+  };
+  
+  struct __attribute__ ((packed)) {
+    uint16_t limit;
+    void* base;
+  } gdtinfo = {
+    sizeof(gdt) - 1,
+    &gdt,
+  };
+  
+  // linear base address
+  char* ds;
+  asm volatile("mov %%ds, %%ax\n"
+	       : "=a"(ds)
+	       : /* no inputs */
+	       : /* no other clobbers */);
+  
+  gdtinfo.base = (void*)(((int)ds << 4) + (int)(gdt));
+  
+  // setup GDT, jump to protected mode, and back
+  asm volatile ("cli\n"
+		"lgdt %0\n"
+		//"mov %%cr0, %%eax\n" // copy
+		"mov $1, %%eax\n" // set pmode bit
+		"mov %%eax, %%cr0\n"
+		"jmp .+2\n" // some 3/486 need to clear the prefetch queue!
+		"mov $0x10, %%ebx\n" // 2nd, d    struct __attribute__ ((packed)) {
+		"mov %%ebx, %%gs\n" // load a pmode descriptor into the %g-segment
+		"and $0xfe, %%al\n" // disable pmode, back to real mode :-/
+		"mov %%eax, %%cr0\n"
+		"jmp .+2\n" // better flush prefetch queue, again
+		"sti\n"
+		: /* outputs */
+		: "rm"(gdtinfo) /* inputs */
+		: "%eax", "%ebx");
+  return (__seg_gs void*)(0xb8000);
+}
+
+#endif
+
 
 // Warning: output is raw, real-mode seg:offset!
 static int mouse_init()

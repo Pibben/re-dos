@@ -192,7 +192,7 @@ int main(void)
 
     getch();
     
-    vga_mode(0x03); // back ot text mode
+    vga_mode(0x03); // back to text mode
   }
   
   printf("end.\n");
