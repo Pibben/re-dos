@@ -27,11 +27,13 @@ int memcmp(const void* s1, const void* s2, size_t n) {
 char* strcpy(char* dest, const char* src) {
   while ((*dest = *src))
     ++dest, ++src;
+  return dest;
 }
 
 char* strncpy(char* dest, const char* src, size_t n) {
   while (n-- > 0 && (*dest = *src))
     ++dest, ++src;
+  return dest;
 }
 
 /*

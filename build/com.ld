@@ -1,13 +1,13 @@
 OUTPUT_FORMAT(binary)
-SECTIONS
-{
+SECTIONS {
     . = 0x0100;
-    .text :
-    {
+    .start : {
+	*(.start);
+     }
+    .text : {
         *(.text);
     }
-    .data :
-    {
+    .data : {
         *(.data);
         *(.bss);
         *(.rodata);

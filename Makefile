@@ -7,8 +7,13 @@ X_ARCH = i386
 
 include build/top.make
 
-CFLAGS += -I libc -s -O0 -m32 -march=i386 -Wall -Wno-unused-function # -fomit-frame-pointer # -Wno-format-security
-CXXFLAGS = $(CFLAGS) #-I stl/include
+# from the linux-kernel build system:
+cc-option = $(shell if $(CC) $(1) -S -o /dev/null -xc /dev/null \
+            > /dev/null 2>&1; then echo "$(1)"; else echo "$(2)"; fi ;)
+
+CFLAGS += -I libc -s -Os -m32 -march=i386 -Wall -Wno-unused-function -fomit-frame-pointer # -Wno-format-security
+CXXFLAGS = $(CFLAGS) -fno-exceptions #-I stl/include
+CXXFLAGS += $(call cc-option,-fno-threadsafe-statics,)
 
 NOT_SRCS += sound.cc sound2.cc # requires FM.{h,c}
 

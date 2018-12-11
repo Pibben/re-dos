@@ -10,6 +10,14 @@
  * copyright holder ExactCODE GmbH Germany.
  */
 
+// has to be placed 1st in .TEXT by linker script
+// "naked" attribute new in gcc-8, not fully supported in clang
+static void __attribute__((section(".start"), naked, used)) start() {
+  asm("call main\n"
+      "mov $0x4c, %ah\n"
+      "int $0x21\n");
+}
+
 void outb(uint16_t port, uint8_t val) {
   asm volatile ("outb %0, %1\n"
 		: /* no outputs */
@@ -40,6 +48,17 @@ uint16_t inw(uint16_t port) {
 		: "Nd"(port)
 		: /* no clobbers */);
   return val;
+}
+
+static void bios_print(const char* string)
+{
+  while (*string) {
+    asm volatile ("mov $0x0e, %%ah\n" // bios tty display char
+		  "int $0x10\n"
+		  : /* no output */
+		  : "a"(*string++)
+		  : /* no other clobbers? */);
+  }
 }
 
 static void dos_print(char* string)
@@ -120,8 +139,8 @@ static void dos_setvect(uint8_t intr, void (*isr)())
 		"int $0x21\n"
 		"pop %%DS\n"
 		: /* no output */
-		: "al"(intr), "d"(isr)
-		: "ah", "bx");  
+		: "a"(intr), "d"(isr)
+		: "bx");  
 }
 
 static void dos_gettime(uint8_t* hour, uint8_t* min,
@@ -149,7 +168,7 @@ static float dos_gettimef()
 static void putchar(char ch)
 {
   // we can only call DOS w/ data-segment pointers, ...
-  static char c[1]; c[0] = {ch};
+  static char c[1]= {ch};
   write(1, c, sizeof(c));
 }
 
@@ -274,7 +293,7 @@ struct unrealptr {
 	       : /* no inputs */
 	       : /* no other clobbers */);
     
-    gdtinfo.base = (void*)((int)ds << 4) + (int)(gdt);
+    gdtinfo.base = (void*)(((int)ds << 4) + (int)(gdt));
     
     // TODO: A20 gate, some legacy systems may have it disabled!
     

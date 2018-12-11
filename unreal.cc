@@ -10,11 +10,6 @@
  * copyright holder ExactCODE GmbH Germany.
  */
 
-// TODO: must currently come first!
-asm("call main\n"
-    "mov $0x4c, %ah\n"
-    "int $0x21\n");
-
 #ifndef DOS
 #define DOS 1
 #endif
